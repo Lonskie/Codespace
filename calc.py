@@ -1,7 +1,15 @@
 import enum
 from typing import List, Tuple, Set, Union
 
-code = "91 + 6 * -(3 - -1)"
+examples = [
+    "91 + 6 * -(3 - -1)",
+    "sin pi + 3",
+    "sin 3!",
+    "x = 9",
+    "2(3x)",
+    "cos(pi + x/3)",
+    "3! / (4!(4-3)!)",
+]
 
 class TokenType(enum.Enum):
     NUMBER     = 0
@@ -22,13 +30,15 @@ class TokenType(enum.Enum):
     def __repr__(self):
         return self.__str__()
 
-OPERATORS: Set[str] = { '+', '-', '*', '/', '^', '**' }
+OPERATORS: Set[str] = { '+', '-', '*', '/', '^', '**', '!', '=', '%', '~', '>', '<', '<=', '>=' }
 Token = Tuple[str, TokenType]
 TokenStream = List[Token]
 
 def char_type(char: str) -> TokenType:
     if char.isdigit():
         return TokenType.NUMBER
+    elif char.isalpha():
+        return TokenType.IDENTIFIER
     elif char in OPERATORS:
         return TokenType.OPERATOR
     elif char == '(':
@@ -69,10 +79,13 @@ def tokenise(string: str) -> TokenStream:
 
     return tokens
 
+JUXTAPOSITION_PRECEDENCE = 9
 PRECEDENCE = {
-    '+':  1, '-': 1,
-    '*':  2, '/': 2,
-    '**': 3, '^': 3,
+    '=': 1,
+    '+':  3, '-': 3,
+    '*':  4, '/': 4,
+    '**': 5, '^': 5,
+    '!': 10
 }
 precedence = lambda op: PRECEDENCE.get(op)
 
@@ -82,11 +95,15 @@ class Assoc(enum.Enum):
     NEITHER = 2
 
 ASSOC = {
+    '=': Assoc.NEITHER,
     '+': Assoc.LEFT, '-': Assoc.LEFT,
     '*': Assoc.LEFT, '/': Assoc.LEFT,
     '**': Assoc.RIGHT, '^': Assoc.RIGHT,
 }
 assoc = lambda op: ASSOC.get(op) or Assoc.NEITHER
+
+POSTFIX: Set['string'] = { '!' }
+is_postfix = lambda op: op in POSTFIX
 
 class BinOp(object):
     def __init__(self, root: str, left=None, right=None):
@@ -97,14 +114,32 @@ class BinOp(object):
         return f"({self.left} {self.value} {self.right})"
 
 class UnOp(object):
-    def __init__(self, root: str, operand=None):
+    def __init__(self, root: str, operand=None, postfix=False):
         self.value: str = root
         self.operand: Expr = operand
+        self.postfix = postfix
     def __str__(self):
-        return f"({self.value}{self.operand})"
+        if self.postfix:
+            return f"({self.operand}{self.value})"
+        else:
+            return f"({self.value}{self.operand})"
 
-Value = int
-Expr = Union[UnOp, BinOp, Value]
+class Juxt(object):
+    def __init__(self, callee, operand):
+        self.callee: Expr = callee
+        self.operand: Expr = operand
+    def __str__(self):
+        return f"({self.callee} {self.operand})"
+
+class Symbol(object):
+    def __init__(self, value):
+        self.name = str(value)
+    def __str__(self):
+        return f"({self.name})"
+
+Number = Union[int, float]
+Value = Union[Number, Symbol]
+Expr = Union[UnOp, BinOp, Juxt, Value]
 
 def parse_prefix(tokens: TokenStream) -> Expr:
     value, token_type = tokens.pop(0)
@@ -113,6 +148,8 @@ def parse_prefix(tokens: TokenStream) -> Expr:
         return UnOp(value, parse_expr(tokens, precedence(value)))
     elif token_type is TokenType.NUMBER:
         return int(value)
+    elif token_type is TokenType.IDENTIFIER:
+        return Symbol(value)
     elif token_type is TokenType.L_PAREN:
         expr = parse_expr(tokens, 0)
         if len(tokens) == 0 or tokens.pop(0)[1] is not TokenType.R_PAREN:
@@ -126,7 +163,9 @@ def token_precedence(token: Token) -> int:
     if ttype is TokenType.R_PAREN:
         return 0
     if ttype is not TokenType.OPERATOR:
-        raise Exception(f"Expected an operator. Got '{value}'")
+        # Juxtaposition is now allowd (function application)
+        #raise Exception(f"Expected an operator. Got '{value}'")
+        return JUXTAPOSITION_PRECEDENCE
     prec = precedence(value)
     if prec is None:
         raise Exception(f"No such operator ('{value}') exists!")
@@ -134,9 +173,18 @@ def token_precedence(token: Token) -> int:
 
 def parse_infix(left: Expr, tokens: TokenStream, prev_prec) -> Expr:
     token = tokens.pop(0)
-    value, _ = token
-    
-    prec = token_precedence(token)
+    value, ttype = token
+    prec = None
+
+    if ttype is TokenType.OPERATOR:
+        prec = token_precedence(token)
+    else:  # Juxtaposition / function-application.
+        tokens.insert(0, token)
+        return Juxt(left, parse_expr(tokens, JUXTAPOSITION_PRECEDENCE))  # High(est?) precende.
+
+    if is_postfix(value):
+        return UnOp(value, left, postfix=True)
+
     if prev_prec == prec and assoc(value) is Assoc.RIGHT:
         prec -= 1
 
@@ -160,6 +208,7 @@ def parse_expr(tokens: TokenStream, prec=0) -> Expr:
         
     return left
 
+from functools import reduce
 OPERATIONS = {
     '+': lambda n, m: n + m,
     '-': lambda n, m=None: -n if m is None else n - m,
@@ -167,33 +216,75 @@ OPERATIONS = {
     '/': lambda n, m: n / m,
     '^': lambda n, m: n ** m,
     '**': lambda n, m: n ** m,
+    '!': lambda n: reduce(lambda acc, e: acc * e, range(2, n+1), 1),
+    '=': lambda ctx, sym, val: ctx.define(sym, val)
 }
 operation = lambda op: OPERATIONS.get(op)
 
-def evaluate(expr: Expr) -> Value:
+class Context(object):
+    def __init__(self, initial=None):
+        self.symbols = initial or dict()
+    def define(self, sym: str, value: Value):
+        self.symbols[sym] = value
+        return value
+    def lookup(self, sym: str):
+        if sym in self.symbols:
+            return self.symbols[sym]
+        raise Exception(f"Variable `{sym}', not defined.")
+
+def evaluate(expr: Expr, ctx: Context) -> Value:
     expr_type = type(expr)
-    if expr_type is Value:
+    if expr_type is Symbol:
+        return ctx.lookup(expr.name)
+    if expr_type in Value.__args__:
         return expr
+
+    if expr_type is Juxt:
+        callee = evaluate(expr.callee, ctx)
+        operand = evaluate(expr.operand, ctx)
+        if type(callee) in Number.__args__: # Juxtaposition of numbers is multiplication.
+            return callee * operand
+        elif not callable(callee):
+            raise Exception(f"Juxtaposition is not defined on `{callee}'.")
+        return callee(operand)
 
     function = operation(expr.value)
     if expr_type is BinOp:
+        if expr.value == '=':
+            if type(expr.left) is Symbol:
+                return function(ctx,
+                    expr.left.name,
+                    evaluate(expr.right, ctx))
+            else:
+                raise Exception("Can only assign to symbols.")
         return function(
-            evaluate(expr.left),
-            evaluate(expr.right))
+            evaluate(expr.left, ctx),
+            evaluate(expr.right, ctx))
     if expr_type is UnOp:
-        return function(evaluate(expr.operand))
+        return function(evaluate(expr.operand, ctx))
 
-print(code)
-stream = tokenise(code)
-#print(' '.join(map(lambda e: f'<{e[0]}>', stream)))
-print(stream)
-ast = parse_expr(stream)
-print(ast)
-result = evaluate(ast)
-print(result)
+import math
+base_context = Context({
+    'sqrt': math.sqrt,
+    'sin': math.sin,
+    'cos': math.cos,
+    'pi': math.pi,
+})
 
-def exec_string(code: str) -> Value:
-    return evaluate(parse_expr(tokenise(code)))
+for (i, code) in enumerate(examples):
+    print(f"\nExample {i + 1}:")
+    tab = "   "
+    print(tab, code)
+    stream = tokenise(code)
+    print(tab, ' '.join(map(lambda e: f'<{e[0]}>', stream)))
+    #print(tab, stream)
+    ast = parse_expr(stream)
+    print(tab, ast)
+    result = evaluate(ast, base_context)
+    print(tab, result)
+
+def exec_string(code: str, ctx: Context) -> Value:
+    return evaluate(parse_expr(tokenise(code)), ctx)
 
 print("\nNow you try!\n")
 
@@ -201,12 +292,15 @@ import readline
 while True:
     prompt = "::> "
     line = input(prompt)
-    if line.strip().lower().startswith("exit"):
+    trimmed = line.strip().lower()
+    if trimmed.startswith("exit"):
         print("\nBuh-bye!")
         break
+    if len(trimmed) == 0:
+        continue
     try:
         expr = parse_expr(tokenise(line))
-        print(f"\033[{len(line) + len(prompt)}C\033[1A = {expr}")
-        print(f"#=> {evaluate(expr)}\n")
+        print(f"\033[{len(line) + len(prompt)}C\033[1A ≡ {expr}")
+        print(f"#=> {evaluate(expr, base_context)}\n")
     except Exception as e:
         print(f"Error: {e}")

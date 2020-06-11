@@ -3,12 +3,18 @@ from typing import List, Tuple, Set, Union
 
 examples = [
     "91 + 6 * -(3 - -1)",
+    "2 - 3 - 4 + 4 ^ 3 ^ 2",
     "sin pi + 3",
     "sin 3!",
     "x = 9",
     "2(3x)",
     "cos(pi + x/3)",
     "3! / (4!(4-3)!)",
+    "lambda = 512.16",
+    "lambda_0 = 511.07",
+    "c = 300_000_000",
+    "c = 3E8",
+    "3E8 (lambda - lambda_0)/lambda_0"
 ]
 
 class TokenType(enum.Enum):
@@ -34,10 +40,17 @@ OPERATORS: Set[str] = { '+', '-', '*', '/', '^', '**', '!', '=', '%', '~', '>', 
 Token = Tuple[str, TokenType]
 TokenStream = List[Token]
 
-def char_type(char: str) -> TokenType:
+def char_type(char: str, old_type: TokenType) -> TokenType:
     if char.isdigit():
+        if old_type is TokenType.IDENTIFIER:
+            return TokenType.IDENTIFIER
+        else:
+            return TokenType.NUMBER
+    elif (char == '.' or char == '_') and old_type in { TokenType.NUMBER, None }:
         return TokenType.NUMBER
-    elif char.isalpha():
+    elif char == 'E' and old_type is TokenType.NUMBER:
+        return TokenType.NUMBER
+    elif char.isalpha() or char == '_':
         return TokenType.IDENTIFIER
     elif char in OPERATORS:
         return TokenType.OPERATOR
@@ -56,14 +69,14 @@ def tokenise(string: str) -> TokenStream:
     tokens: TokenStream = []
     while c < end:
         char = string[c]
-        current_type = char_type(char)
+        current_type = char_type(char, current_type)
         
         if current_type is None:
             c += 1
             continue
 
         end_of_token = (c + 1 == end
-            or char_type(string[c + 1]) is not current_type)
+            or char_type(string[c + 1], current_type) is not current_type)
 
         if current_type in [TokenType.L_PAREN, TokenType.R_PAREN]:
             end_of_token = True
@@ -95,7 +108,7 @@ class Assoc(enum.Enum):
     NEITHER = 2
 
 ASSOC = {
-    '=': Assoc.NEITHER,
+    '=': Assoc.RIGHT,
     '+': Assoc.LEFT, '-': Assoc.LEFT,
     '*': Assoc.LEFT, '/': Assoc.LEFT,
     '**': Assoc.RIGHT, '^': Assoc.RIGHT,
@@ -135,7 +148,7 @@ class Symbol(object):
     def __init__(self, value):
         self.name = str(value)
     def __str__(self):
-        return f"({self.name})"
+        return self.name
 
 Number = Union[int, float]
 Value = Union[Number, Symbol]
@@ -147,7 +160,7 @@ def parse_prefix(tokens: TokenStream) -> Expr:
     if token_type is TokenType.OPERATOR:
         return UnOp(value, parse_expr(tokens, precedence(value)))
     elif token_type is TokenType.NUMBER:
-        return int(value)
+        return float(value) if '.' in value or 'E' in value else int(value)
     elif token_type is TokenType.IDENTIFIER:
         return Symbol(value)
     elif token_type is TokenType.L_PAREN:
@@ -185,8 +198,11 @@ def parse_infix(left: Expr, tokens: TokenStream, prev_prec) -> Expr:
     if is_postfix(value):
         return UnOp(value, left, postfix=True)
 
-    if prev_prec == prec and assoc(value) is Assoc.RIGHT:
+    if assoc(value) is Assoc.RIGHT:
         prec -= 1
+    elif assoc(value) is Assoc.NEITHER and prev_prec == prec:
+        raise Exception("Cannot chain this operator with equal precedence."
+            + " Please use parentheses.")
 
     return BinOp(value,
         left  = left,
@@ -198,13 +214,14 @@ def parse_expr(tokens: TokenStream, prec=0) -> Expr:
         return left
 
     current_precedence = token_precedence(tokens[0])
+    old_precedence = 0
 
     while prec < current_precedence:
-        left = parse_infix(left, tokens, current_precedence)
+        left = parse_infix(left, tokens, old_precedence)
         if len(tokens) == 0: break
 
-        token = tokens[0]
-        current_precedence = token_precedence(token)
+        old_precedence = current_precedence
+        current_precedence = token_precedence(tokens[0])
         
     return left
 
